@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>Mapa GPS - Santo Domingo Norte</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+  html,body,#map{height:100%;margin:0}
+  body{font-family:Arial,sans-serif}
+  #panel{position:fixed;z-index:1000;top:10px;left:10px;right:10px;background:#fff;padding:10px;border-radius:10px;box-shadow:0 2px 12px #0003;max-width:520px}
+  button,input{font-size:15px;padding:8px;margin:3px}
+  #status{font-size:13px;margin-top:5px}
+  .ok{color:#087f23}.warn{color:#a65b00}.err{color:#b00020}
+  #coords{font-family:monospace;font-size:12px}
+</style>
+</head>
+<body>
+<div id="panel">
+  <b>📍 Mapa GPS — Santo Domingo Norte</b><br>
+  <input id="dxfFile" type="file" accept=".dxf">
+  <button id="gpsBtn">Activar GPS</button>
+  <button id="centerBtn">Centrar en GPS</button>
+  <div id="status" class="warn">Carga el DXF y luego activa el GPS.</div>
+  <div id="coords"></div>
+</div>
+<div id="map"></div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/dxf-parser@1.1.2/dist/dxf-parser.js"></script>
+<script>
+const map = L.map('map', {preferCanvas:true}).setView([18.59732,-70.08605], 12);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{
+  maxZoom:21, attribution:'© OpenStreetMap contributors'
+}).addTo(map);
+
+const CAD = L.layerGroup().addTo(map);
+let gpsMarker=null, gpsCircle=null, watchId=null, lastGPS=null;
+
+function utm19ToLatLon(e,n){
+  const a=6378137.0, eccSquared=0.00669438, k0=0.9996;
+  const eccPrimeSquared=eccSquared/(1-eccSquared);
+  const e1=(1-Math.sqrt(1-eccSquared))/(1+Math.sqrt(1-eccSquared));
+  const x=e-500000.0, y=n;
+  const M=y/k0;
+  const mu=M/(a*(1-eccSquared/4-3*eccSquared**2/64-5*eccSquared**3/256));
+  const phi1Rad=mu+(3*e1/2-27*e1**3/32)*Math.sin(2*mu)
+    +(21*e1**2/16-55*e1**4/32)*Math.sin(4*mu)
+    +(151*e1**3/96)*Math.sin(6*mu)
+    +(1097*e1**4/512)*Math.sin(8*mu);
+  const N1=a/Math.sqrt(1-eccSquared*Math.sin(phi1Rad)**2);
+  const T1=Math.tan(phi1Rad)**2;
+  const C1=eccPrimeSquared*Math.cos(phi1Rad)**2;
+  const R1=a*(1-eccSquared)/Math.pow(1-eccSquared*Math.sin(phi1Rad)**2,1.5);
+  const D=x/(N1*k0);
+  const lat=phi1Rad-(N1*Math.tan(phi1Rad)/R1)*
+    (D**2/2-(5+3*T1+10*C1-4*C1**2-9*eccPrimeSquared)*D**4/24+
+    (61+90*T1+298*C1+45*T1**2-252*eccPrimeSquared-3*C1**2)*D**6/720);
+  const lon0=(-69)*Math.PI/180;
+  const lon=lon0+(D-(1+2*T1+C1)*D**3/6+
+    (5-2*C1+28*T1-3*C1**2+8*eccPrimeSquared+24*T1**2)*D**5/120)/Math.cos(phi1Rad);
+  return [lat*180/Math.PI, lon*180/Math.PI];
+}
+
+function addLine(a,b,style={weight:1,opacity:.55}){
+  if(!a||!b||a.x==null||a.y==null) return;
+  const p1=utm19ToLatLon(a.x,a.y), p2=utm19ToLatLon(b.x,b.y);
+  L.polyline([p1,p2],style).addTo(CAD);
+}
+function renderEntity(ent){
+  if(ent.type==='LINE') addLine(ent.vertices?.[0]||ent.start, ent.vertices?.[1]||ent.end);
+  else if(ent.type==='LWPOLYLINE'){
+    const v=ent.vertices||[];
+    for(let i=0;i<v.length-1;i++) addLine(v[i],v[i+1]);
+    if(ent.shape && v.length>1) addLine(v[v.length-1],v[0]);
+  } else if(ent.type==='POLYLINE'){
+    const v=ent.vertices||[];
+    for(let i=0;i<v.length-1;i++) addLine(v[i],v[i+1]);
+    if(ent.shape && v.length>1) addLine(v[v.length-1],v[0]);
+  }
+}
+document.getElementById('dxfFile').addEventListener('change', async e=>{
+  const f=e.target.files[0]; if(!f) return;
+  statusMsg('Leyendo DXF ('+(f.size/1024/1024).toFixed(1)+' MB)...','warn');
+  try{
+    const text=await f.text();
+    const parser=new DxfParser();
+    const dxf=parser.parseSync(text);
+    CAD.clearLayers();
+    let count=0;
+    for(const ent of (dxf.entities||[])){
+      if(ent.type==='LINE'||ent.type==='LWPOLYLINE'||ent.type==='POLYLINE'){
+        renderEntity(ent); count++;
+      }
+    }
+    if(CAD.getLayers().length){
+      map.fitBounds(CAD.getBounds(),{padding:[20,20]});
+      statusMsg('Plano cargado. Entidades dibujadas: '+count+'.','ok');
+    }else{
+      statusMsg('El DXF no contiene líneas/polilíneas compatibles.','err');
+    }
+  }catch(err){
+    console.error(err);
+    statusMsg('No se pudo leer el DXF: '+err.message,'err');
+  }
+});
+function statusMsg(t,c){const s=document.getElementById('status');s.textContent=t;s.className=c||''}
+
+document.getElementById('gpsBtn').onclick=()=>{
+  if(!navigator.geolocation){
+    statusMsg('Este dispositivo no ofrece geolocalización.','err'); return;
+  }
+  if(watchId!==null){navigator.geolocation.clearWatch(watchId);watchId=null;statusMsg('GPS detenido.','warn');return;}
+  statusMsg('Solicitando permiso de ubicación...','warn');
+  watchId=navigator.geolocation.watchPosition(pos=>{
+    lastGPS=pos;
+    const lat=pos.coords.latitude, lon=pos.coords.longitude, acc=pos.coords.accuracy;
+    if(!gpsMarker){
+      gpsMarker=L.marker([lat,lon],{title:'Mi ubicación'}).addTo(map).bindPopup('📍 Mi ubicación');
+      gpsCircle=L.circle([lat,lon],{radius:acc,weight:1}).addTo(map);
+    }else{
+      gpsMarker.setLatLng([lat,lon]); gpsCircle.setLatLng([lat,lon]).setRadius(acc);
+    }
+    document.getElementById('coords').textContent =
+      `Lat: ${lat.toFixed(7)}  Lon: ${lon.toFixed(7)}  Precisión: ±${Math.round(acc)} m`;
+    statusMsg('GPS activo y actualizándose en tiempo real.','ok');
+  },err=>{
+    statusMsg('Error GPS: '+err.message,'err');
+  },{enableHighAccuracy:true,maximumAge:2000,timeout:15000});
+};
+document.getElementById('centerBtn').onclick=()=>{
+  if(lastGPS) map.setView([lastGPS.coords.latitude,lastGPS.coords.longitude],18);
+  else statusMsg('Primero activa el GPS.','warn');
+};
+</script>
+</body>
+</html>
